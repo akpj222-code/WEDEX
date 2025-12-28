@@ -1,0 +1,15 @@
+{
+  "name": "wedex-healthcare",
+  "version": "1.0.0",
+  "description": "Project files for WEDEX Healthcare.",
+  "main": "index.js",
+  "scripts": {
+    "build:css": "tailwindcss -i ./css/style.css -o ./css/output.css --watch"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "tailwindcss": "^3.4.1"
+  }
+}

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Auth Handler</title>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
+    <script>
+        const firebaseConfig = {
+            apiKey: "AIzaSyCkUx4Zz4xKu1HyISfnw_pEBMGBDVbdCZw",
+            authDomain: "wedexhealthcareservices.com",
+            projectId: "wedex-health-990e3",
+            storageBucket: "wedex-health-990e3.firebasestorage.app",
+            messagingSenderId: "244841465651",
+            appId: "1:244841465651:web:10460394f5ed05dd812046",
+            measurementId: "G-H7609D1WRF"
+        };
+        firebase.initializeApp(firebaseConfig);
+        console.log('Firebase Auth Handler initialized');
+    </script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background: #f5f5f5;
+        }
+        .loader {
+            text-align: center;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #0d9488;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="loader">
+        <div class="spinner"></div>
+        <p>Processing authentication...</p>
+    </div>
+</body>
+</html>
