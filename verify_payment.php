@@ -1,68 +1,58 @@
 <?php
 require_once 'config.php';
-require_once 'config/flutterwave.php';
+require_once 'config/paystack.php';
 
 header('Content-Type: application/json');
 
-// Get POST data
 $input = json_decode(file_get_contents('php://input'), true);
-
-$transaction_id = $input['transaction_id'] ?? '';
-$tx_ref = $input['tx_ref'] ?? '';
+$reference = $input['reference'] ?? '';
 $order_data = $input['order_data'] ?? [];
 
-if (empty($transaction_id) || empty($tx_ref)) {
-    echo json_encode(['success' => false, 'message' => 'Invalid payment data']);
+if (empty($reference)) {
+    echo json_encode(['success' => false, 'message' => 'Invalid reference']);
     exit;
 }
 
-// Verify payment with Flutterwave
-$url = "https://api.flutterwave.com/v3/transactions/{$transaction_id}/verify";
-
+// Verify with Paystack
+$url = "https://api.paystack.co/transaction/verify/" . rawurlencode($reference);
 $ch = curl_init();
 curl_setopt($ch, CURLOPT_URL, $url);
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-curl_setopt($ch, CURLOPT_HTTPHEADER, [
-    'Authorization: Bearer ' . FLUTTERWAVE_SECRET_KEY
-]);
-
+curl_setopt($ch, CURLOPT_HTTPHEADER, ['Authorization: Bearer ' . PAYSTACK_SECRET_KEY]);
 $response = curl_exec($ch);
-$http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
-
-if ($http_code !== 200) {
-    echo json_encode(['success' => false, 'message' => 'Payment verification failed']);
-    exit;
-}
 
 $result = json_decode($response, true);
 
-// Check if payment was successful
-if ($result['status'] === 'success' && $result['data']['status'] === 'successful' && $result['data']['tx_ref'] === $tx_ref) {
+// Check success
+if (isset($result['status']) && $result['status'] === true && $result['data']['status'] === 'success') {
     
-    // Payment verified! Now save the order
+    // Recalculate Totals in NGN (Backend Verification)
+    $subtotal = 0;
+    $cart_items = $_SESSION['cart'] ?? [];
+    
     try {
-        // Generate order number
-        $order_number = 'WEDEX-' . strtoupper(uniqid());
-        
-        // Calculate cart totals
-        $cart_items = $_SESSION['cart'] ?? [];
-        $subtotal = 0;
-        
         foreach ($cart_items as $product_id => $item) {
-            $stmt = $pdo->prepare("SELECT price FROM products WHERE id = ?");
+            $stmt = $pdo->prepare("SELECT price, name FROM products WHERE id = ?");
             $stmt->execute([$product_id]);
             $product = $stmt->fetch();
             if ($product) {
+                // Use DB price directly (NGN)
                 $subtotal += $product['price'] * $item['quantity'];
+                
+                // Store name/price for item insertion
+                $cart_items[$product_id]['db_price'] = $product['price'];
+                $cart_items[$product_id]['name'] = $product['name'];
             }
         }
         
-        $shipping = $subtotal > 200000 ? 0 : 5000;
+        $shipping = $subtotal > 500000 ? 0 : 5000;
         $tax = $subtotal * 0.075;
         $total = $subtotal + $shipping + $tax;
         
-        // Save order to database
+        // Generate Order
+        $order_number = 'WEDEX-' . strtoupper(uniqid());
+        
         $order_sql = "INSERT INTO orders (
             order_number, user_id, customer_email, customer_phone, customer_name,
             shipping_address, city, state, order_notes,
@@ -86,54 +76,36 @@ if ($result['status'] === 'success' && $result['data']['status'] === 'successful
             $shipping,
             $tax,
             $total,
-            'flutterwave',
+            'paystack', 
             'paid',
-            $transaction_id,
-            $tx_ref,
+            $result['data']['id'],
+            $reference,
             'processing'
         ]);
         
         $order_id = $pdo->lastInsertId();
         
-        // Save order items
+        // Save items
         foreach ($cart_items as $product_id => $item) {
-            $stmt = $pdo->prepare("SELECT name, price FROM products WHERE id = ?");
-            $stmt->execute([$product_id]);
-            $product = $stmt->fetch();
-            
-            if ($product) {
-                $item_sql = "INSERT INTO order_items (order_id, product_id, product_name, quantity, price) VALUES (?, ?, ?, ?, ?)";
-                $stmt = $pdo->prepare($item_sql);
-                $stmt->execute([
-                    $order_id,
-                    $product_id,
-                    $product['name'],
-                    $item['quantity'],
-                    $product['price']
-                ]);
-                
-                // Update product stock
-                $update_stock = "UPDATE products SET stock = stock - ? WHERE id = ?";
-                $stmt = $pdo->prepare($update_stock);
-                $stmt->execute([$item['quantity'], $product_id]);
-            }
+             $item_sql = "INSERT INTO order_items (order_id, product_id, product_name, quantity, price) VALUES (?, ?, ?, ?, ?)";
+             $stmt = $pdo->prepare($item_sql);
+             $stmt->execute([
+                 $order_id, $product_id, $item['name'], $item['quantity'], $item['db_price']
+             ]);
+             
+             // Update Stock
+             $stmt = $pdo->prepare("UPDATE products SET stock = stock - ? WHERE id = ?");
+             $stmt->execute([$item['quantity'], $product_id]);
         }
         
-        // Clear cart
         $_SESSION['cart'] = [];
-        
-        echo json_encode([
-            'success' => true,
-            'order_number' => $order_number,
-            'message' => 'Payment verified and order created successfully'
-        ]);
+        echo json_encode(['success' => true, 'order_number' => $order_number]);
         
     } catch (PDOException $e) {
-        error_log("Order creation error: " . $e->getMessage());
-        echo json_encode(['success' => false, 'message' => 'Failed to create order']);
+        error_log($e->getMessage());
+        echo json_encode(['success' => false, 'message' => 'Database error']);
     }
-    
 } else {
-    echo json_encode(['success' => false, 'message' => 'Payment verification failed']);
+    echo json_encode(['success' => false, 'message' => 'Payment verification failed at gateway']);
 }
 ?>
