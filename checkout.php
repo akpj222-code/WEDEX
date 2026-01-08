@@ -1,6 +1,6 @@
 <?php
 require_once 'config.php';
-require_once 'config/paystack.php';
+require_once 'config/flutterwave.php';
 
 // Check if user is logged in
 $user_id = $_SESSION['user_id'] ?? null;
@@ -21,8 +21,11 @@ if ($user_id) {
     }
 }
 
+// Get current exchange rate for conversion
+$rate = getCurrentExchangeRate();
+
 $cart_items = [];
-$subtotal = 0;
+$subtotal_ngn = 0; // Track subtotal in NGN for consistent business logic
 
 if (!empty($_SESSION['cart'])) {
     $product_ids = array_keys($_SESSION['cart']);
@@ -37,18 +40,19 @@ if (!empty($_SESSION['cart'])) {
         $product_id = $product['id'];
         $quantity = $_SESSION['cart'][$product_id]['quantity'];
         
-        // FOR TESTING: We use the database price directly as NGN
-        // Your DB has prices like 160000.00, which works perfectly for Naira
-        $price = $product['price'];
+        // Calculate NGN Subtotal
+        $subtotal_ngn += $product['price'] * $quantity;
+
+        // Convert price to USD for display and payment
+        $price_usd = $product['price'] / $rate;
         
         $cart_items[] = [
             'id' => $product_id,
             'name' => $product['name'],
-            'price' => $price,
+            'price' => $price_usd,
             'image' => $product['image'],
             'quantity' => $quantity,
         ];
-        $subtotal += $price * $quantity;
     }
 }
 
@@ -57,12 +61,19 @@ if (empty($cart_items)) {
     exit;
 }
 
-// SHIPPING LOGIC (NGN)
-// Example: Free shipping if over ₦500,000, else ₦5,000
-$shipping = $subtotal > 500000 ? 0 : 5000;
+// --- LOGIC SYNCHRONIZATION ---
+// We use the NGN constants to determine shipping, then convert to USD
+$SHIPPING_THRESHOLD_NGN = 200000;
+$SHIPPING_COST_NGN = 5000;
+
+$subtotal_usd = $subtotal_ngn / $rate;
+
+// Determine shipping cost in USD based on NGN threshold
+$shipping_usd = ($subtotal_ngn > $SHIPPING_THRESHOLD_NGN) ? 0 : ($SHIPPING_COST_NGN / $rate);
+
 $tax_rate = 0.075;
-$tax = $subtotal * $tax_rate;
-$total = $subtotal + $shipping + $tax;
+$tax_usd = $subtotal_usd * $tax_rate;
+$total_usd = $subtotal_usd + $shipping_usd + $tax_usd;
 
 $tx_ref = 'WEDEX-' . time() . '-' . mt_rand(100000, 999999);
 ?>
@@ -74,9 +85,7 @@ $tx_ref = 'WEDEX-' . time() . '-' . mt_rand(100000, 999999);
     <title>Checkout - WEDEX Healthcare</title>
     <link href="css/output.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    
-    <script src="https://js.paystack.co/v1/inline.js"></script>
-    
+    <script src="https://checkout.flutterwave.com/v3.js"></script>
     <script src="js/notifications.js"></script>
     <style> body { font-family: 'Inter', sans-serif; } </style>
 </head>
@@ -89,17 +98,26 @@ $tx_ref = 'WEDEX-' . time() . '-' . mt_rand(100000, 999999);
             <nav class="flex items-center space-x-2 text-sm">
                 <a href="index.php" class="text-gray-500 hover:text-teal-600">Home</a>
                 <span class="text-gray-400">/</span>
-                <span class="text-gray-800 font-medium">Checkout (Test Mode: NGN)</span>
+                <a href="cart.php" class="text-gray-500 hover:text-teal-600">Cart</a>
+                <span class="text-gray-400">/</span>
+                <span class="text-gray-800 font-medium">Checkout</span>
             </nav>
         </div>
     </div>
 
+    <?php if (defined('FLUTTERWAVE_TEST_MODE') && FLUTTERWAVE_TEST_MODE): ?>
+    <div class="bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4">
+        <div class="container mx-auto px-4">
+            <p class="font-bold">⚠️ Test Mode Active</p>
+            <p class="text-sm">Use test card: 5531 8866 5214 2950 | CVV: 564 | Expiry: 09/32 | PIN: 3310</p>
+        </div>
+    </div>
+    <?php endif; ?>
+
     <div class="container mx-auto px-4 py-8">
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            
             <div class="lg:col-span-2">
                 <form id="checkout-form" class="space-y-6">
-                    
                     <div class="bg-white rounded-lg shadow-md p-6">
                         <h2 class="text-xl font-bold text-gray-800 mb-6">Contact Information</h2>
                         <div class="space-y-4">
@@ -127,7 +145,11 @@ $tx_ref = 'WEDEX-' . time() . '-' . mt_rand(100000, 999999);
                             </div>
                             <div class="md:col-span-2">
                                 <label for="address" class="block text-sm font-semibold text-gray-700 mb-2">Street Address *</label>
-                                <input type="text" id="address" name="address" required class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
+                                <input type="text" id="address" name="address" required class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" placeholder="House number and street name">
+                            </div>
+                            <div class="md:col-span-2">
+                                <label for="address2" class="block text-sm font-semibold text-gray-700 mb-2">Apartment, suite, etc. (Optional)</label>
+                                <input type="text" id="address2" name="address2" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
                             </div>
                             <div>
                                 <label for="city" class="block text-sm font-semibold text-gray-700 mb-2">City *</label>
@@ -144,46 +166,60 @@ $tx_ref = 'WEDEX-' . time() . '-' . mt_rand(100000, 999999);
                             <div>
                                 <label for="country" class="block text-sm font-semibold text-gray-700 mb-2">Country *</label>
                                 <select id="country" name="country" required class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 bg-white">
+                                    <option value="">Select Country</option>
                                     <option value="NG">Nigeria</option>
                                     <option value="US">United States</option>
                                     <option value="GB">United Kingdom</option>
-                                </select>
+                                    <option value="CA">Canada</option>
+                                    </select>
                             </div>
                         </div>
+                    </div>
+
+                    <div class="bg-white rounded-lg shadow-md p-6">
+                        <h2 class="text-xl font-bold text-gray-800 mb-4">Order Notes (Optional)</h2>
+                        <textarea name="order_notes" rows="4" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"></textarea>
                     </div>
                 </form>
             </div>
 
             <div class="lg:col-span-1">
                 <div class="bg-white rounded-lg shadow-md p-6 sticky top-24">
-                    <h2 class="text-xl font-bold text-gray-800 mb-6">Order Summary (NGN)</h2>
+                    <h2 class="text-xl font-bold text-gray-800 mb-6">Order Summary</h2>
                     
                     <div class="space-y-4 mb-6 pb-6 border-b max-h-64 overflow-y-auto">
                         <?php foreach ($cart_items as $item): ?>
                         <div class="flex items-center space-x-3">
-                            <img src="uploads/<?php echo htmlspecialchars($item['image']); ?>" class="w-16 h-16 object-cover rounded-lg flex-shrink-0">
+                            <img src="uploads/<?php echo htmlspecialchars($item['image']); ?>" alt="<?php echo htmlspecialchars($item['name']); ?>" class="w-16 h-16 object-cover rounded-lg flex-shrink-0">
                             <div class="flex-1 min-w-0">
                                 <p class="font-semibold text-gray-800 text-sm truncate"><?php echo htmlspecialchars($item['name']); ?></p>
                                 <p class="text-sm text-gray-600">Qty: <?php echo $item['quantity']; ?></p>
                             </div>
-                            <p class="font-semibold text-gray-800 text-sm">₦<?php echo number_format($item['price'] * $item['quantity'], 2); ?></p>
+                            <p class="font-semibold text-gray-800 text-sm">$<?php echo number_format($item['price'] * $item['quantity'], 2); ?></p>
                         </div>
                         <?php endforeach; ?>
                     </div>
                     
                     <div class="space-y-3 mb-6">
-                        <div class="flex justify-between text-gray-600"><span>Subtotal</span><span class="font-semibold">₦<?php echo number_format($subtotal, 2); ?></span></div>
-                        <div class="flex justify-between text-gray-600"><span>Shipping</span><span class="font-semibold">₦<?php echo number_format($shipping, 2); ?></span></div>
-                        <div class="flex justify-between text-gray-600"><span>Tax (7.5%)</span><span class="font-semibold">₦<?php echo number_format($tax, 2); ?></span></div>
-                        <div class="border-t pt-3"><div class="flex justify-between text-lg font-bold text-gray-800"><span>Total</span><span>₦<?php echo number_format($total, 2); ?></span></div></div>
+                        <div class="flex justify-between text-gray-600"><span>Subtotal</span><span class="font-semibold">$<?php echo number_format($subtotal_usd, 2); ?></span></div>
+                        <div class="flex justify-between text-gray-600">
+                            <span>Shipping</span>
+                            <span class="font-semibold"><?php echo $shipping_usd > 0 ? '$' . number_format($shipping_usd, 2) : 'FREE'; ?></span>
+                        </div>
+                        <div class="flex justify-between text-gray-600"><span>Tax (7.5%)</span><span class="font-semibold">$<?php echo number_format($tax_usd, 2); ?></span></div>
+                        <div class="border-t pt-3"><div class="flex justify-between text-lg font-bold text-gray-800"><span>Total</span><span>$<?php echo number_format($total_usd, 2); ?></span></div></div>
+                        <div class="text-xs text-gray-500 mt-2">Exchange Rate: $1 = ₦<?php echo number_format($rate, 2); ?></div>
                     </div>
 
                     <button type="button" id="pay-button" class="w-full bg-teal-600 text-white py-4 rounded-lg font-semibold hover:bg-teal-700 transition mb-4">
-                        Pay ₦<?php echo number_format($total, 2); ?>
+                        Pay $<?php echo number_format($total_usd, 2); ?>
                     </button>
-                    
+
                     <div class="text-center text-sm text-gray-600">
-                        <span>Secured Payment by Paystack</span>
+                        <div class="flex items-center justify-center space-x-2 mb-2">
+                            <svg class="w-5 h-5 text-green-600" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"></path></svg>
+                            <span>Secured Payment by Flutterwave</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -202,51 +238,59 @@ $tx_ref = 'WEDEX-' . time() . '-' . mt_rand(100000, 999999);
 
         const formData = new FormData(form);
         const customerEmail = document.getElementById('customer_email').value;
-        const customerName = document.getElementById('customer_firstname').value + ' ' + document.getElementById('customer_lastname').value;
         const customerPhone = document.getElementById('customer_phone').value;
+        const customerName = document.getElementById('customer_firstname').value + ' ' + document.getElementById('customer_lastname').value;
 
-        // Paystack Pop - TEST MODE NGN
-        const handler = PaystackPop.setup({
-            key: '<?php echo PAYSTACK_PUBLIC_KEY; ?>',
-            email: customerEmail,
-            amount: <?php echo ceil($total * 100); ?>, // Amount in Kobo
-            currency: 'NGN', // Using Naira for test
-            ref: '<?php echo $tx_ref; ?>',
-            metadata: {
-                custom_fields: [
-                    { display_name: "Customer Name", variable_name: "customer_name", value: customerName },
-                    { display_name: "Mobile Number", variable_name: "mobile_number", value: customerPhone }
-                ]
+        FlutterwaveCheckout({
+            public_key: "<?php echo FLUTTERWAVE_PUBLIC_KEY; ?>",
+            tx_ref: "<?php echo $tx_ref; ?>",
+            amount: <?php echo $total_usd; ?>,
+            currency: "USD",
+            payment_options: "card, banktransfer, ussd",
+            redirect_url: "<?php echo FLUTTERWAVE_REDIRECT_URL; ?>",
+            customer: {
+                email: customerEmail,
+                phone_number: customerPhone,
+                name: customerName,
             },
-            callback: function(response) {
-                // Verify on backend
-                fetch('verify_payment.php', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        reference: response.reference,
-                        order_data: Object.fromEntries(formData)
+            customizations: {
+                title: "WEDEX Healthcare",
+                description: "Payment for medical supplies",
+                logo: "<?php echo $_SERVER['REQUEST_SCHEME'] . '://' . $_SERVER['HTTP_HOST']; ?>/images/Blue_Logo.png",
+            },
+            meta: {
+                consumer_id: "<?php echo $user_id ?? 'guest'; ?>",
+                order_data: JSON.stringify(Object.fromEntries(formData))
+            },
+            callback: function(data) {
+                if (data.status === "successful") {
+                    // Send transaction details to backend for verification
+                    fetch('verify_payment.php', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            transaction_id: data.transaction_id,
+                            tx_ref: data.tx_ref,
+                            order_data: Object.fromEntries(formData)
+                        })
                     })
-                })
-                .then(response => response.json())
-                .then(result => {
-                    if (result.success) {
-                        window.location.href = 'order_confirmation.php?order=' + result.order_number;
-                    } else {
-                        Toast.error('Verification failed: ' + result.message);
-                    }
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    Toast.error('An error occurred during verification.');
-                });
-            },
-            onClose: function() {
-                Toast.info('Payment window closed');
+                    .then(response => response.json())
+                    .then(result => {
+                        if (result.success) {
+                            window.location.href = 'order_confirmation.php?order=' + result.order_number;
+                        } else {
+                            Toast.error(result.message || 'Payment verification failed.');
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                        Toast.error('An error occurred. Please contact support.');
+                    });
+                } else {
+                    Toast.error('Payment was not successful. Please try again.');
+                }
             }
         });
-        
-        handler.openIframe();
     });
     </script>
 </body>
